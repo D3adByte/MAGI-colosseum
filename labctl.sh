@@ -147,6 +147,95 @@ ensure_index() {
 }
 
 # ─────────────────────────────────────────────────────────────
+# Benchmark corpus installer
+# ─────────────────────────────────────────────────────────────
+
+cmd_install() {
+    local mode="${1:-}"
+    local shallow=1 dry_run=0
+
+    case "$mode" in
+        "") ;;
+        --full) shallow=0 ;;
+        --dry-run) dry_run=1 ;;
+        *) die "Usage: ./labctl install [--full|--dry-run]" ;;
+    esac
+
+    command -v git >/dev/null 2>&1 || die "Git is not installed."
+
+    local -a paths=(
+        "binary-exploitation/mbe"
+        "forensics/memlabs"
+        "forensics/trailofbits-ctf"
+        "mixed-ctf/google-ctf"
+        "mixed-ctf/nyu-ctf-bench"
+        "mobile-re/frida-labs"
+        "reversing/crebench"
+        "reversing/flare-learning-hub"
+        "vuln-services/vulhub"
+    )
+    local -a urls=(
+        "https://github.com/RPISEC/MBE.git"
+        "https://github.com/stuxnet999/MemLabs.git"
+        "https://github.com/trailofbits/ctf.git"
+        "https://github.com/google/google-ctf.git"
+        "https://github.com/NYU-LLM-CTF/NYU_CTF_Bench.git"
+        "https://github.com/DERE-ad2001/Frida-Labs.git"
+        "https://github.com/wangyu-ovo/CREBench.git"
+        "https://github.com/mandiant/flare-learning-hub.git"
+        "https://github.com/vulhub/vulhub.git"
+    )
+
+    local i path target installed=0 skipped=0 failed=0
+    local -a clone_args=(clone)
+    ((shallow)) && clone_args+=(--depth 1)
+
+    info "Installing ${#paths[@]} benchmark corpora..."
+    ((shallow)) && info "Using shallow clones. Pass --full for complete Git history."
+
+    for ((i = 0; i < ${#paths[@]}; i++)); do
+        path="${paths[$i]}"
+        target="$ROOT/$path"
+
+        if [[ -d "$target/.git" ]]; then
+            ok "Already installed: $path"
+            ((skipped++))
+            continue
+        fi
+        if [[ -e "$target" ]]; then
+            warn "Cannot install over existing non-Git path: $path"
+            ((failed++))
+            continue
+        fi
+
+        if ((dry_run)); then
+            printf 'git'
+            printf ' %q' "${clone_args[@]}" "${urls[$i]}" "$target"
+            printf '\n'
+            ((installed++))
+            continue
+        fi
+
+        mkdir -p "$(dirname "$target")" || die "Cannot create parent for $path"
+        info "Downloading: $path"
+        if git "${clone_args[@]}" "${urls[$i]}" "$target"; then
+            ((installed++))
+        else
+            warn "Download failed: $path"
+            ((failed++))
+        fi
+    done
+
+    if ((!dry_run)); then
+        cmd_index
+    fi
+
+    printf '\nInstalled: %d; already present: %d; failed: %d\n' \
+        "$installed" "$skipped" "$failed"
+    ((failed == 0)) || die "Some benchmark corpora could not be installed."
+}
+
+# ─────────────────────────────────────────────────────────────
 # Index
 # ─────────────────────────────────────────────────────────────
 
@@ -722,6 +811,15 @@ ROOT
 
 USAGE
 
+  ./labctl install
+      Download all benchmark corpora using shallow clones.
+
+  ./labctl install --full
+      Download all corpora with complete Git history.
+
+  ./labctl install --dry-run
+      Show the downloads without changing the filesystem.
+
   ./labctl index
       Discover all Docker Compose labs.
 
@@ -806,6 +904,10 @@ EOF
 # ─────────────────────────────────────────────────────────────
 
 case "${1:-help}" in
+
+    install|download)
+        cmd_install "${2:-}"
+        ;;
 
     index)
         cmd_index

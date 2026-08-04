@@ -14,6 +14,7 @@ validating labs.
 ## Usage
 
 ```bash
+./labctl.sh install
 ./labctl.sh index
 ./labctl.sh list
 ./labctl.sh start <name>
@@ -23,6 +24,11 @@ validating labs.
 ./labctl.sh reset [name]
 ./labctl.sh validate [filter]
 ```
+
+`install` downloads all nine upstream benchmark corpora using shallow Git
+clones and rebuilds the Compose index. The corpus is large, so make sure the
+machine has sufficient disk space. Use `./labctl.sh install --full` only when
+complete upstream Git history is required.
 
 Run `./labctl.sh help` for the complete command reference.
 

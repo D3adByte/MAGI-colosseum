@@ -1,0 +1,10 @@
+.labctl/
+
+# Upstream benchmark corpora are separate repositories and must not be
+# accidentally vendored into this controller repository.
+binary-exploitation/
+forensics/
+mixed-ctf/
+mobile-re/
+reversing/
+vuln-services/

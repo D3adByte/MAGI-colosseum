@@ -1,0 +1,22 @@
+{
+  "manifest_version": "1.0",
+  "scenario_version": "1.0.0",
+  "id": "fixture-reverse-file",
+  "title": "Tiny Static Reversing Fixture",
+  "category": "reverse-engineering",
+  "difficulty": "introductory",
+  "tags": ["fixture", "offline", "binary"],
+  "source": {"kind": "native", "uri": "local:fixtures/reverse", "license": "CC0-1.0", "provenance": "MAGI-Colosseum test fixture"},
+  "platform": {"os": ["any"], "architectures": ["any"]},
+  "objective": "Analyze the supplied reversing fixture.",
+  "completion_criteria": ["Analyze the supplied artifact", "Record reproducible evidence"],
+  "capabilities": [{"kind": "provided_file"}, {"kind": "binary"}],
+  "artifacts": [{"id": "reverse-binary", "kind": "provided_file", "source": "artifacts/challenge.bin", "name": "challenge.bin", "sha256": "a6607d04782881e61a72e7ef1de3e3acc028a13432f162bcbc0ea010f30a6eb2"}],
+  "build": {"required": false, "network_access": false},
+  "runtime": {"runner": "file"},
+  "constraints": {"network_access": false, "filesystem": "episode-only", "wall_time_seconds": 300, "cpu_count": 1, "memory_bytes": 134217728, "process_limit": 32, "disk_bytes": 16777216},
+  "readiness": {"kind": "none"},
+  "cleanup": {"strategy": "delete-episode-workspace", "idempotent": true},
+  "timeout": {"wall_time_seconds": 300, "on_timeout": "stop"},
+  "determinism": {"supported": true, "seed_scope": "episode"}
+}

@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Agent briefing","type":"object","required":["contract_version","episode_id","scenario_id","status","scenario","capabilities","constraints"],"properties":{"contract_version":{"const":"1.0"},"scenario":{"type":"object"},"capabilities":{"type":"array"},"constraints":{"type":"object"}}}

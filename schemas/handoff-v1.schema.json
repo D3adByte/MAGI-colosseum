@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Luc1-MAGI challenge handoff",
+  "type": "object",
+  "required": ["contract_version", "challenge_id", "episode_id", "objective", "targets", "artifacts", "authorization", "completion_criteria"],
+  "properties": {
+    "contract_version": {"const": "1.0"},
+    "challenge_id": {"type": "string"},
+    "episode_id": {"type": "string"},
+    "objective": {"type": "string"},
+    "network": {"type": ["string", "null"], "enum": ["luc1-magi-lab", null]},
+    "target_containers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["container_id", "host", "port", "protocol", "network"],
+        "properties": {
+          "container_id": {"type": "string", "pattern": "^colosseum-[a-z0-9-]+$"},
+          "host": {"type": "string", "pattern": "^colosseum-[a-z0-9-]+$"},
+          "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+          "protocol": {"type": "string"},
+          "url": {"type": "string"},
+          "network": {"const": "luc1-magi-lab"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "artifacts": {"type": "array"},
+    "authorization": {
+      "type": "object",
+      "required": ["authorized", "scope", "episode_id"],
+      "properties": {"authorized": {"const": true}, "scope": {"const": "episode-targets-only"}, "episode_id": {"type": "string"}}
+    },
+    "completion_criteria": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "capability_recommendations": {"type": "object"},
+    "working_directory": {"type": "string"},
+    "telemetry": {
+      "type": "object",
+      "required": ["endpoint", "project"],
+      "properties": {"endpoint": {"type": "string"}, "project": {"type": "string"}}
+    },
+    "argv": {"type": "array", "items": {"type": "string"}},
+    "invocation": {"type": "string"},
+    "command": {"type": "string"}
+  },
+  "additionalProperties": true
+}

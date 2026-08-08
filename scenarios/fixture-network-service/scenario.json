@@ -1,0 +1,22 @@
+{
+  "manifest_version": "1.0",
+  "scenario_version": "1.0.0",
+  "id": "fixture-network-service",
+  "title": "Isolated TCP Protocol Fixture",
+  "category": "network",
+  "difficulty": "introductory",
+  "tags": ["fixture", "tcp", "container"],
+  "source": {"kind": "native", "uri": "local:fixtures/network", "license": "CC0-1.0", "provenance": "MAGI-Colosseum test fixture"},
+  "platform": {"os": ["linux"], "architectures": ["amd64", "arm64"]},
+  "objective": "Connect to the supplied TCP endpoint, send hello, and document the complete acknowledgement line.",
+  "completion_criteria": ["Connect to the registered target", "Record the acknowledgement line"],
+  "capabilities": [{"kind": "network_target"}, {"kind": "interactive_service"}],
+  "artifacts": [],
+  "build": {"required": true, "network_access": false, "inputs": [{"path": "service/Dockerfile", "sha256": "883c25a15437fa6c0d1cabec63597e825b4e086dde463cc5521c49bcdc010316"}, {"path": "service/server.py", "sha256": "537f5473ea495b5c6c24d8f28984844448dcb929d0293db4ab8e875e220b4b51"}]},
+  "runtime": {"runner": "compose", "compose_file": "compose.normalized.json", "services": [{"name": "gateway", "capability": "interactive_service", "protocol": "tcp", "internal_port": 31337}]},
+  "constraints": {"network_access": "luc1-magi-lab-only", "filesystem": "none", "wall_time_seconds": 300, "cpu_count": 1, "memory_bytes": 134217728, "process_limit": 64, "disk_bytes": 16777216},
+  "readiness": {"kind": "tcp", "service": "gateway", "timeout_seconds": 20},
+  "cleanup": {"strategy": "compose-down-volumes", "idempotent": true},
+  "timeout": {"wall_time_seconds": 300, "on_timeout": "stop"},
+  "determinism": {"supported": true, "seed_scope": "episode"}
+}

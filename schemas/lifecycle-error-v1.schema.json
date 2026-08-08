@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Lifecycle error","type":"object","required":["contract_version","status","error"],"properties":{"contract_version":{"const":"1.0"},"status":{"const":"error"},"error":{"type":"object","required":["code","message","retryable"]}}}

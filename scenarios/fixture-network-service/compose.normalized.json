@@ -1,0 +1,30 @@
+{
+  "services": {
+    "challenge": {
+      "build": {"context": "./service"},
+      "read_only": true,
+      "tmpfs": ["/tmp:size=16m,mode=1777"],
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 64,
+      "mem_limit": "128m",
+      "cpus": 0.5,
+      "networks": ["default"]
+    },
+    "gateway": {
+      "image": "alpine/socat@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e",
+      "command": ["TCP-LISTEN:31337,fork,reuseaddr", "TCP:challenge:31337"],
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 32,
+      "mem_limit": "64m",
+      "cpus": 0.25,
+      "depends_on": ["challenge"],
+      "networks": ["default"]
+    }
+  },
+  "networks": {
+    "default": {"external": true, "name": "luc1-magi-lab"}
+  }
+}

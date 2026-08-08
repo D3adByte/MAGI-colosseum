@@ -1,4 +1,11 @@
 .labctl/
+.colosseum/
+.venv/
+__pycache__/
+*.pyc
+corpora/
+tools/
+*-certification.json
 
 # Upstream benchmark corpora are separate repositories and must not be
 # accidentally vendored into this controller repository.

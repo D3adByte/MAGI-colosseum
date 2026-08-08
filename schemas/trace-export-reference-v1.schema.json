@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Luc1-MAGI trace reference","type":"object","required":["harness_version","episode_id","artifacts"],"properties":{"harness_version":{"type":"string"},"episode_id":{"type":"string"},"artifacts":{"type":"array"},"evidence_refs":{"type":"array","items":{"type":"string"}}}}

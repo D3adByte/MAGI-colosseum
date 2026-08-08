@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://magi.local/colosseum/schemas/scenario-manifest-v1.schema.json",
+  "title": "MAGI-Colosseum Scenario Manifest",
+  "type": "object",
+  "required": ["manifest_version", "scenario_version", "id", "title", "category", "difficulty", "tags", "source", "platform", "capabilities", "artifacts", "build", "runtime", "constraints", "readiness", "cleanup", "timeout", "determinism"],
+  "properties": {
+    "manifest_version": {"const": "1.0"},
+    "scenario_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "title": {"type": "string"}, "category": {"type": "string"},
+    "difficulty": {"type": ["string", "number"]},
+    "tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "source": {"type": "object", "required": ["kind", "uri", "license", "provenance"]},
+    "platform": {"type": "object", "required": ["os", "architectures"]},
+    "objective": {"type": "string"},
+    "completion_criteria": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "capabilities": {"type": "array", "items": {"$ref": "#/$defs/capability"}},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "build": {"type": "object", "required": ["required", "network_access"]},
+    "runtime": {"type": "object", "required": ["runner"], "properties": {"runner": {"enum": ["file", "compose"]}}},
+    "constraints": {"type": "object", "required": ["network_access", "filesystem", "wall_time_seconds", "cpu_count", "memory_bytes", "process_limit", "disk_bytes"]},
+    "readiness": {"type": "object", "required": ["kind"]},
+    "cleanup": {"type": "object", "required": ["strategy", "idempotent"]},
+    "timeout": {"type": "object", "required": ["wall_time_seconds", "on_timeout"]},
+    "determinism": {"type": "object", "required": ["supported", "seed_scope"]}
+  },
+  "$defs": {
+    "capability": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["network_target", "web_endpoint", "interactive_service", "provided_file", "source_tree", "binary", "memory_image", "disk_image", "packet_capture", "credentials", "multi_service"]}}},
+    "artifact": {"type": "object", "required": ["id", "kind", "source", "name", "sha256"], "properties": {"sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}}
+  },
+  "additionalProperties": true
+}

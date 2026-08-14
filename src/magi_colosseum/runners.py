@@ -56,11 +56,13 @@ class FileRunner:
         return {"status": episode["status"]}
 
     def stop(self, scenario: Scenario, episode: dict, episode_dir: Path) -> dict:
+        shutil.rmtree(episode_dir, ignore_errors=True)
         return {"status": "stopped"}
 
     def reset(self, scenario: Scenario, episode: dict, episode_dir: Path) -> dict:
-        shutil.rmtree(episode_dir, ignore_errors=True)
-        return {"status": "reset"}
+        self.stop(scenario, episode, episode_dir)
+        episode_dir.mkdir(parents=True, exist_ok=False)
+        return self.start(scenario, episode, episode_dir)
 
 
 class ComposeRunner(FileRunner):
@@ -99,9 +101,11 @@ class ComposeRunner(FileRunner):
         artifacts = _stage_artifacts(scenario, episode_dir)
         override = episode_dir / "compose.episode.json"
         compose_services = self._service_names(scenario, episode)
-        services = {name: {"container_name": self._container_name(scenario.id, episode["episode_id"], name),
-                           "networks": ["default"]}
-                    for name in compose_services}
+        services = {
+            name: {"container_name": self._container_name(episode["episode_id"], position),
+                   "networks": ["default"]}
+            for position, name in enumerate(compose_services, 1)
+        }
         override.write_text(json.dumps({"services": services}, sort_keys=True))
         episode["runner_state"] = {"override_file": str(override),
                                    "container_names": {name: item["container_name"]
@@ -169,11 +173,11 @@ class ComposeRunner(FileRunner):
         return names
 
     @staticmethod
-    def _container_name(scenario_id: str, episode_id: str, service: str) -> str:
-        slug = re.sub(r"[^a-z0-9-]+", "-", scenario_id.lower()).strip("-")
-        service_slug = re.sub(r"[^a-z0-9-]+", "-", service.lower()).strip("-")
-        suffix = episode_id.removeprefix("ep-")[:8]
-        return f"colosseum-{slug[:30]}-{suffix}-{service_slug[:20]}"[:63].rstrip("-")
+    def _container_name(episode_id: str, position: int) -> str:
+        # Runtime names are contestant-visible DNS. Never put scenario IDs,
+        # product names, CVEs, or upstream service names in them.
+        suffix = re.sub(r"[^a-f0-9]", "", episode_id.lower().removeprefix("ep-"))[:16]
+        return f"colosseum-{suffix}-target-{position}"
 
     def _verify_attachments(self, episode: dict) -> None:
         for service, container in episode["runner_state"]["container_names"].items():
@@ -210,14 +214,17 @@ class ComposeRunner(FileRunner):
         (episode_dir / "infrastructure.log").write_text(logs.stdout + logs.stderr)
         proc = subprocess.run(self._compose(scenario, episode, "down", "--volumes", "--remove-orphans"),
                               capture_output=True, text=True)
-        return {"status": "stopped" if proc.returncode == 0 else "cleanup_failed"}
+        if proc.returncode:
+            return {"status": "cleanup_failed"}
+        shutil.rmtree(episode_dir, ignore_errors=True)
+        return {"status": "stopped"}
 
     def reset(self, scenario: Scenario, episode: dict, episode_dir: Path) -> dict:
         result = self.stop(scenario, episode, episode_dir)
         if result["status"] == "cleanup_failed":
             return result
-        shutil.rmtree(episode_dir, ignore_errors=True)
-        return {"status": "reset"}
+        episode_dir.mkdir(parents=True, exist_ok=False)
+        return self.start(scenario, episode, episode_dir)
 
 
 RUNNERS: dict[str, ScenarioRunner] = {"file": FileRunner(), "compose": ComposeRunner()}

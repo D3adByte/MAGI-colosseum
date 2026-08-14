@@ -9,6 +9,10 @@ from .model import Scenario, load_scenario
 class Catalog:
     def __init__(self, roots: list[Path]):
         self.roots = roots
+        self._cache: list[Scenario] | None = None
+
+    def refresh(self) -> None:
+        self._cache = None
 
     def paths(self) -> list[Path]:
         found: set[Path] = set()
@@ -18,6 +22,8 @@ class Catalog:
         return sorted(found)
 
     def all(self) -> list[Scenario]:
+        if self._cache is not None:
+            return list(self._cache)
         scenarios: list[Scenario] = []
         ids: set[str] = set()
         for path in self.paths():
@@ -32,7 +38,8 @@ class Catalog:
                 raise ValidationError(f"duplicate scenario id: {scenario.id}")
             ids.add(scenario.id)
             scenarios.append(scenario)
-        return sorted(scenarios, key=lambda item: item.id)
+        self._cache = sorted(scenarios, key=lambda item: item.id)
+        return list(self._cache)
 
     def get(self, scenario_id: str) -> Scenario:
         for scenario in self.all():

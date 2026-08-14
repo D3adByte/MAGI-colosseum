@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import secrets
-import shlex
 import random
-import shutil
 from pathlib import Path
+from collections.abc import Callable
 
 from . import CONTRACT_VERSION, __version__
 from .catalog import Catalog
 from .errors import ValidationError
 from .runners import RUNNERS
 from .store import EpisodeStore
-from .util import atomic_json
 
 
 def now() -> str:
@@ -21,10 +18,17 @@ def now() -> str:
 
 
 class Engine:
-    def __init__(self, catalog: Catalog, state_dir: Path):
+    def __init__(self, catalog: Catalog, state_dir: Path, workspace_root: Path | None = None):
         self.catalog = catalog
         self.store = EpisodeStore(state_dir)
         self.state_dir = state_dir
+        self.workspace_root = workspace_root or state_dir / "episodes"
+
+    def _episode_dir(self, episode: dict) -> Path:
+        # workspace was added after the first contract version; retain the
+        # fallback so existing local episode records can still be cleaned up.
+        return Path(episode.get("workspace", self.state_dir / "episodes" /
+                                episode["episode_id"]))
 
     def _runner(self, name: str):
         try:
@@ -53,8 +57,9 @@ class Engine:
                    "seed": seed,
                    "status": "starting", "created_at": timestamp, "updated_at": timestamp,
                    "launch": {}}
+        episode_dir = self.workspace_root / episode_id
+        episode["workspace"] = str(episode_dir)
         self.store.put(episode)
-        episode_dir = self.state_dir / "episodes" / episode_id
         episode_dir.mkdir(parents=True, exist_ok=False)
         try:
             launch = self._runner(scenario.runner).start(scenario, episode, episode_dir)
@@ -77,65 +82,32 @@ class Engine:
         return self.describe(episode_id, "agent")
 
     def start_random(self, seed: int, category: str | None = None,
-                     tag: str | None = None) -> dict:
+                     tag: str | None = None,
+                     progress: Callable[[str], None] | None = None) -> dict:
         candidates = self.catalog.filter(category, tag)
-        valid = [scenario for scenario in candidates
-                 if self._runner(scenario.runner).validate(scenario).get("status") == "valid"]
+        valid = []
+        for position, scenario in enumerate(candidates, 1):
+            if progress:
+                progress(f"validating [{position}/{len(candidates)}] {scenario.id}")
+            if self._runner(scenario.runner).validate(scenario).get("status") == "valid":
+                valid.append(scenario)
         if not valid:
             raise ValidationError("no validated scenarios match the requested filters")
         selected = random.Random(seed).choice(sorted(valid, key=lambda item: item.id))
+        if progress:
+            progress(f"selected {selected.id}; starting {selected.runner} lab")
         result = self.start(selected.id, seed)
+        if progress:
+            progress(f"ready {result['episode_id']}")
         result["selection"] = {"kind": "deterministic-random", "category": category,
                                "tag": tag, "candidate_count": len(valid)}
-        return result
-
-    def certify(self, scenario_id: str, seed: int = 0) -> dict:
-        """Exercise a clean build/start/readiness/stop/reset lifecycle."""
-        scenario = self.catalog.get(scenario_id)
-        episode_id = None
-        checks = []
-        try:
-            validation = self.validate(scenario_id)
-            valid = validation.get("status") == "valid"
-            checks.append({"id": "validate", "status": "passed" if valid else "failed",
-                           "detail": validation})
-            if not valid:
-                raise ValidationError("runner validation failed")
-            build = self.build(scenario_id)
-            checks.append({"id": "build", "status": "passed", "detail": build})
-            launch = self.start(scenario_id, seed)
-            episode_id = launch["episode_id"]
-            checks.append({"id": "readiness", "status": "passed"})
-            stopped = self.stop(episode_id)
-            if stopped["status"] != "stopped":
-                raise ValidationError(f"stop returned {stopped['status']}")
-            checks.append({"id": "stop", "status": "passed"})
-            reset = self.reset(episode_id)
-            if reset["status"] != "reset":
-                raise ValidationError(f"reset returned {reset['status']}")
-            checks.append({"id": "reset", "status": "passed"})
-            status = "certified"
-            error = None
-        except Exception as exc:
-            status = "failed"
-            error = {"type": type(exc).__name__, "message": str(exc)}
-            if episode_id:
-                try:
-                    self.reset(episode_id)
-                except Exception:
-                    pass
-        result = {"contract_version": CONTRACT_VERSION, "scenario_id": scenario_id,
-                  "scenario_version": scenario.version, "manifest_hash": scenario.manifest_hash,
-                  "runner_version": __version__, "status": status, "checks": checks,
-                  "error": error, "certified_at": now()}
-        atomic_json(self.state_dir / "certifications" / f"{scenario_id}.json", result)
         return result
 
     def status(self, episode_id: str) -> dict:
         episode = self.store.get(episode_id)
         scenario = self.catalog.get(episode["scenario_id"])
         runtime = self._runner(scenario.runner).status(scenario, episode,
-                                                       self.state_dir / "episodes" / episode_id)
+                                                       self._episode_dir(episode))
         return {"contract_version": CONTRACT_VERSION, "episode_id": episode_id,
                 "scenario_id": scenario.id, **runtime}
 
@@ -149,85 +121,32 @@ class Engine:
                   "status": episode["status"], "seed": episode["seed"]}
         result["scenario"] = scenario.public_view() if audience == "public" else scenario.agent_view()
         if audience == "agent":
-            result["capabilities"] = episode.get("launch", {}).get("capabilities", [])
+            capabilities = episode.get("launch", {}).get("capabilities", [])
+            result["artifacts"] = [item for item in capabilities if item.get("local_path")]
+            result["targets"] = [item for item in capabilities
+                                 if item.get("host") and item.get("port")]
+            result["prompt"] = self._target_prompt(result["artifacts"], result["targets"])
             result["constraints"] = scenario.manifest["constraints"]
         return result
 
-    def handoff(self, episode_id: str, endpoint: str | None = None,
-                model: str | None = None, approve: bool = False,
-                luc1_dir: str = "~/Luciv3", model_timeout: int = 600,
-                otel_endpoint: str = "http://127.0.0.1:6006/v1/traces",
-                otel_project: str = "luc1-magi") -> dict:
-        briefing = self.describe(episode_id, "agent")
-        objective = briefing["scenario"].get("objective", "Analyze the supplied challenge")
-        argv = [".venv/bin/luc1-magi", "run", "--objective", objective]
-        artifacts = []
-        targets = []
-        target_containers = []
-        recommended_capabilities = []
-        for capability in briefing.get("capabilities", []):
-            if capability.get("local_path"):
-                artifacts.append({key: capability[key] for key in
-                                  ("artifact_id", "name", "local_path", "sha256", "size")
-                                  if key in capability})
-                argv.extend(["--artifact", capability["local_path"]])
-            if capability.get("host") and capability.get("port"):
-                target = {key: capability[key] for key in
-                          ("container_id", "host", "port", "protocol", "url", "service", "network")
-                          if key in capability}
-                targets.append(target)
-                argv.extend(["--target", capability.get("url") or
-                             f"{capability['host']}:{capability['port']}"])
-                container = capability.get("container_id")
-                if container and container not in target_containers:
-                    target_containers.append(container)
-                recommendation = ("web_observation" if capability.get("protocol") in {"http", "https"}
-                                  else "network_service_interaction")
-                if recommendation not in recommended_capabilities:
-                    recommended_capabilities.append(recommendation)
-        if approve:
-            argv.append("--approve")
-        if target_containers:
-            argv.append("--kali")
-            for container in target_containers:
-                argv.extend(["--lab-container", container])
-        if endpoint:
-            argv.extend(["--endpoint", endpoint])
-        if model:
-            argv.extend(["--model", model])
-        argv.extend(["--model-timeout", str(model_timeout)])
-        if otel_endpoint:
-            argv.extend(["--otel-endpoint", otel_endpoint])
-        if otel_project:
-            argv.extend(["--otel-project", otel_project])
-        argv.append("-vv")
-        completion = briefing["scenario"].get("completion_criteria") or [
-            "Identify the vulnerability or solve the supplied challenge",
-            "Record reproducible evidence",
-            "Explain the security impact or recovered result",
-        ]
-        return {"contract_version": CONTRACT_VERSION, "challenge_id": briefing["scenario_id"],
-                "episode_id": episode_id, "objective": objective, "artifacts": artifacts,
-                "targets": targets, "target_containers": target_containers,
-                "network": "luc1-magi-lab" if target_containers else None,
-                "authorization": {"authorized": True, "scope": "episode-targets-only",
-                                  "episode_id": episode_id,
-                                  "prohibited_targets": ["localhost", "host", "control-plane",
-                                                         "public-internet"]},
-                "completion_criteria": completion,
-                "capability_recommendations": {"capabilities": recommended_capabilities,
-                                               "kali_executor": bool(target_containers)},
-                "constraints": briefing["constraints"], "working_directory": luc1_dir,
-                "telemetry": {"endpoint": otel_endpoint, "project": otel_project},
-                "argv": argv, "invocation": shlex.join(argv),
-                "command": f"cd {luc1_dir}\n\n{shlex.join(argv)}"}
+    @staticmethod
+    def _target_prompt(artifacts: list[dict], targets: list[dict]) -> str:
+        lines = []
+        for target in targets:
+            address = target.get("url") or f"{target['host']}:{target['port']}"
+            label = "Web service" if target.get("protocol") in {"http", "https"} \
+                else "Network service"
+            lines.append(f"{label} is running at {address}")
+        for artifact in artifacts:
+            lines.append(f"Challenge file is located at {artifact['local_path']}")
+        return "\n".join(lines)
 
 
     def stop(self, episode_id: str) -> dict:
         episode = self.store.get(episode_id)
         scenario = self.catalog.get(episode["scenario_id"])
         result = self._runner(scenario.runner).stop(scenario, episode,
-                                                    self.state_dir / "episodes" / episode_id)
+                                                    self._episode_dir(episode))
         episode["status"] = result["status"]
         episode["updated_at"] = now()
         self.store.put(episode)
@@ -237,16 +156,12 @@ class Engine:
         episode = self.store.get(episode_id)
         scenario = self.catalog.get(episode["scenario_id"])
         result = self._runner(scenario.runner).reset(scenario, episode,
-                                                     self.state_dir / "episodes" / episode_id)
+                                                     self._episode_dir(episode))
+        if result["status"] == "ready":
+            episode["launch"] = result
         episode["status"] = result["status"]
         episode["updated_at"] = now()
         self.store.put(episode)
-        return {"contract_version": CONTRACT_VERSION, "episode_id": episode_id, **result}
-
-    def export(self, episode_id: str, destination: Path) -> dict:
-        episode = self.store.get(episode_id)
-        source = self.state_dir / "episodes" / episode_id
-        base = destination.with_suffix("")
-        archive = shutil.make_archive(str(base), "zip", source)
-        return {"contract_version": CONTRACT_VERSION, "episode_id": episode_id,
-                "archive": archive}
+        response = self.describe(episode_id, "agent")
+        response["reset"] = result["status"] == "ready"
+        return response

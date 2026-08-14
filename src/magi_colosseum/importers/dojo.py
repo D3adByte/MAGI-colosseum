@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from html import unescape
 from pathlib import Path
 from typing import Callable
 
@@ -16,6 +17,21 @@ CATEGORY_MAP = {
     "pwn": "binary-exploitation", "crypto": "cryptography", "forensics": "forensics",
     "web": "web", "misc": "miscellaneous",
 }
+
+RAW_CATEGORY_MAP = {
+    "REV": "reverse-engineering", "REVERSE": "reverse-engineering",
+    "PWN": "binary-exploitation", "CRYPTO": "cryptography",
+    "FORENSICS": "forensics", "FORENSIC": "forensics", "WEB": "web",
+    "MISC": "miscellaneous", "OSINT": "osint", "BLOCKCHAIN": "blockchain",
+}
+
+ADMIN_NAMES = {
+    "description.md", "rehost.md", "challenge.json", "module.yml", ".flag.sha256",
+    ".init", "flag", "flag.txt", "flagcheck", "dockerfile",
+    "docker-compose.yml", "docker-compose.yaml",
+    "compose.yml", "compose.yaml",
+}
+ADMIN_MARKERS = ("solve", "solution", "writeup", "flagcheck")
 
 
 def _slug(relative: Path) -> str:
@@ -34,12 +50,138 @@ def _artifact_kind(path: Path) -> tuple[str, list[dict]]:
     return "provided_file", [{"kind": "provided_file"}]
 
 
+def _raw_entries(module: Path) -> list[dict]:
+    entries = []
+    current = None
+    for line in module.read_text(errors="replace").splitlines():
+        match = re.match(r"\s*-\s+id:\s*(.+?)\s*$", line)
+        if match:
+            current = {"id": match.group(1).strip().strip("'\"")}
+            entries.append(current)
+            continue
+        match = re.match(r"\s+name:\s*(.+?)\s*$", line)
+        if match and current is not None and "name" not in current:
+            current["name"] = unescape(match.group(1).strip().strip("'\""))
+    return [entry for entry in entries if entry.get("id")]
+
+
+def _raw_category(name: str) -> tuple[str, str, str]:
+    name = unescape(name)
+    parts = [part.strip() for part in name.split(" - ", 2)]
+    raw = parts[0].upper() if parts else "MISC"
+    category = RAW_CATEGORY_MAP.get(raw, "miscellaneous")
+    points = parts[1] if len(parts) == 3 and parts[1].isdigit() else "unspecified"
+    title = parts[2] if len(parts) == 3 else name
+    return category, points, title
+
+
+def _raw_player_files(task_root: Path) -> list[Path]:
+    result = []
+    for path in sorted(task_root.rglob("*")):
+        if path.is_symlink():
+            raise ValidationError("symlinks are not accepted in raw archive challenges")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(task_root)
+        lowered = relative.name.lower()
+        if lowered in ADMIN_NAMES or lowered.startswith(".flag"):
+            continue
+        if any(marker in lowered for marker in ADMIN_MARKERS):
+            continue
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        result.append(path)
+    return result
+
+
+def _import_raw_archive(source: Path, destination: Path, filter_text: str | None,
+                        progress: Callable[[str], None] | None) -> dict:
+    discovered = []
+    for module in sorted(source.glob("*/module.yml")):
+        for entry in _raw_entries(module):
+            task_root = module.parent / entry["id"]
+            if task_root.is_dir():
+                relative = task_root.relative_to(source)
+                if not filter_text or filter_text.lower() in str(relative).lower():
+                    discovered.append((relative, task_root, entry))
+    if progress:
+        progress(f"dojo: discovered {len(discovered)} raw archive challenges")
+    imported, failed, skipped = [], [], []
+    for position, (relative, task_root, entry) in enumerate(discovered, 1):
+        output = destination / _slug(relative)
+        try:
+            category, points, title = _raw_category(entry.get("name", entry["id"]))
+            # Raw web/pwn challenges normally require a forge-generated service.
+            # Never pretend their server-side files are contestant artifacts.
+            if category in {"web", "binary-exploitation"}:
+                skipped.append({"source": str(relative), "reason": "service_requires_forge"})
+                continue
+            files = _raw_player_files(task_root)
+            if not files:
+                skipped.append({"source": str(relative), "reason": "no_safe_player_files"})
+                continue
+            output.mkdir(parents=True, exist_ok=True)
+            artifacts, capabilities, seen = [], [], set()
+            for index, path in enumerate(files, 1):
+                kind, file_capabilities = _artifact_kind(path)
+                suffix = "".join(path.suffixes)
+                artifacts.append({"id": f"artifact-{index}", "kind": kind,
+                                  "source": str(path.relative_to(task_root)),
+                                  "name": f"artifact-{index}{suffix}",
+                                  "sha256": sha256_file(path)})
+                for capability in file_capabilities:
+                    if capability["kind"] not in seen:
+                        capabilities.append(capability)
+                        seen.add(capability["kind"])
+            manifest = {
+                "manifest_version": "1.0", "scenario_version": "1.0.0",
+                "id": _slug(relative), "title": title, "category": category,
+                # Archive points reflect an event's scoring curve, not a
+                # portable challenge difficulty rating.
+                "difficulty": "unspecified",
+                "tags": ["imported", "ctf-dojo", "raw-archive"],
+                "source": {"kind": "ctf-dojo", "uri": str(relative),
+                           "license": "verify-upstream", "provenance": "pwn.college CTF Archive",
+                           "upstream_points": int(points) if points != "unspecified" else None},
+                "platform": {"os": ["any"], "architectures": ["any"]},
+                "objective": "Analyze the supplied challenge files and recover the requested value.",
+                "capabilities": capabilities, "artifacts": artifacts,
+                "completion_criteria": ["Solve the supplied challenge"],
+                "build": {"required": False, "network_access": False},
+                "runtime": {"runner": "file"},
+                "constraints": {"network_access": False, "filesystem": "episode-only",
+                                "wall_time_seconds": 1800, "cpu_count": 2,
+                                "memory_bytes": 2147483648, "process_limit": 512,
+                                "disk_bytes": 10737418240},
+                "readiness": {"kind": "none"},
+                "cleanup": {"strategy": "delete-episode-workspace", "idempotent": True},
+                "timeout": {"wall_time_seconds": 1800, "on_timeout": "stop"},
+                "determinism": {"supported": False, "seed_scope": "none"},
+                "_content_root": str(task_root.resolve()),
+            }
+            validate_manifest(manifest, task_root)
+            atomic_json(output / "scenario.json", manifest)
+            imported.append({"scenario_id": manifest["id"], "source": str(relative),
+                             "category": category})
+        except Exception as exc:
+            (output / "scenario.json").unlink(missing_ok=True)
+            failed.append({"source": str(relative), "error": str(exc)})
+        if progress and (position == 1 or position % 50 == 0 or position == len(discovered)):
+            progress(f"dojo: [{position}/{len(discovered)}] "
+                     f"{len(imported)} imported, {len(skipped)} skipped, {len(failed)} failed")
+    return {"status": "complete" if not failed else "partial", "format": "raw-archive",
+            "imported": imported, "failed": failed, "skipped": skipped,
+            "imported_count": len(imported), "failed_count": len(failed),
+            "skipped_count": len(skipped)}
+
+
 def import_dojo(source: Path, destination: Path, filter_text: str | None = None,
                 progress: Callable[[str], None] | None = None) -> dict:
-    """Import an already-forged CTF-Dojo/CTF-Archive tree.
+    """Import a raw CTF Archive or an already-forged CTF-Dojo tree.
 
-    This does not run CTF-Forge or an LLM. It consumes the generated contract:
-    challenge.json, optional docker-compose.yml, and declared player files.
+    Forged trees use challenge.json contracts and may include Compose services.
+    Raw archives use module.yml metadata and conservatively import safe offline
+    player files while reporting service challenges that still require forging.
     """
     source = source.resolve()
     if not source.is_dir():
@@ -47,9 +189,11 @@ def import_dojo(source: Path, destination: Path, filter_text: str | None = None,
     imported, failed = [], []
     challenge_files = sorted(source.rglob("challenge.json"))
     if not challenge_files:
+        module_files = list(source.glob("*/module.yml"))
+        if module_files:
+            return _import_raw_archive(source, destination, filter_text, progress)
         return {"status": "not_forged", "imported": [], "failed": [{
-            "source": str(source),
-            "error": "no generated challenge.json files found; run CTF-Forge first",
+            "source": str(source), "error": "no challenge.json or module.yml files found",
         }], "imported_count": 0, "failed_count": 1}
     challenge_files = [path for path in challenge_files
                        if not filter_text or filter_text.lower() in

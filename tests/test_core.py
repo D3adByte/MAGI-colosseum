@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +15,7 @@ from magi_colosseum.runners import ComposeRunner, FileRunner
 from magi_colosseum.importers.vulhub import import_vulhub
 from magi_colosseum.importers.dojo import import_dojo
 from magi_colosseum.cli import human, parser
+from magi_colosseum.web import ASSETS, Jobs, _scenario_detail, create_app
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = ROOT / "scenarios"
@@ -30,10 +32,12 @@ class FileLifecycleTests(unittest.TestCase):
     def test_file_only_episode_has_artifact_and_no_fake_endpoint(self):
         launch = self.engine.start("fixture-reverse-file", 1234)
         self.assertEqual(launch["status"], "ready")
-        self.assertEqual([item["kind"] for item in launch["capabilities"]], ["provided_file"])
-        self.assertFalse(any("host" in item or "port" in item for item in launch["capabilities"]))
-        artifact = launch["capabilities"][0]
+        self.assertEqual([item["kind"] for item in launch["artifacts"]], ["provided_file"])
+        self.assertEqual(launch["targets"], [])
+        artifact = launch["artifacts"][0]
         self.assertEqual(len(artifact["sha256"]), 64)
+        self.assertEqual(launch["prompt"],
+                         f"Challenge file is located at {artifact['local_path']}")
     def test_agent_projection_excludes_provenance_and_scoring(self):
         launch = self.engine.start("fixture-reverse-file", 3)
         agent = self.engine.describe(launch["episode_id"], "agent")
@@ -45,26 +49,24 @@ class FileLifecycleTests(unittest.TestCase):
 
     def test_reset_is_idempotent(self):
         launch = self.engine.start("fixture-reverse-file", 4)
-        self.assertEqual(self.engine.reset(launch["episode_id"])["status"], "reset")
-        self.assertEqual(self.engine.reset(launch["episode_id"])["status"], "reset")
+        artifact = Path(launch["artifacts"][0]["local_path"])
+        artifact.chmod(0o644)
+        artifact.write_bytes(b"changed")
+        reset = self.engine.reset(launch["episode_id"])
+        self.assertEqual(reset["status"], "ready")
+        self.assertTrue(reset["reset"])
+        self.assertEqual(reset["artifacts"][0]["sha256"],
+                         "a6607d04782881e61a72e7ef1de3e3acc028a13432f162bcbc0ea010f30a6eb2")
+        self.assertEqual(self.engine.reset(launch["episode_id"])["status"], "ready")
 
-    def test_handoff_produces_copyable_file_invocation(self):
-        launch = self.engine.start("fixture-reverse-file", 9)
-        handoff = self.engine.handoff(launch["episode_id"], "http://127.0.0.1:8095/v1", "magi", True)
-        self.assertIn("--artifact", handoff["argv"])
-        self.assertIn("--approve", handoff["argv"])
-        self.assertIn("--endpoint", handoff["argv"])
-        self.assertEqual(handoff["argv"][0], ".venv/bin/luc1-magi")
-        self.assertIn("--model-timeout", handoff["argv"])
-        self.assertIn("--otel-endpoint", handoff["argv"])
-        self.assertIn("--otel-project", handoff["argv"])
-        self.assertEqual(handoff["telemetry"], {
-            "endpoint": "http://127.0.0.1:6006/v1/traces", "project": "luc1-magi"})
-        self.assertNotIn("--capability-config", handoff["argv"])
-        self.assertNotIn("--allow-program", handoff["argv"])
-        self.assertEqual(handoff["working_directory"], "~/Luciv3")
+    def test_stop_deletes_staged_artifact(self):
+        launch = self.engine.start("fixture-reverse-file", 6)
+        artifact = Path(launch["artifacts"][0]["local_path"])
+        self.assertTrue(artifact.exists())
+        self.assertEqual(self.engine.stop(launch["episode_id"])["status"], "stopped")
+        self.assertFalse(artifact.exists())
 
-    def test_service_handoff_uses_registered_container_identity(self):
+    def test_service_target_uses_registered_container_identity(self):
         launch = self.engine.start("fixture-reverse-file", 13)
         episode = self.engine.store.get(launch["episode_id"])
         episode["launch"]["capabilities"].append({
@@ -75,34 +77,68 @@ class FileLifecycleTests(unittest.TestCase):
             "url": "http://colosseum-test-1234-web:8080/",
         })
         self.engine.store.put(episode)
-        handoff = self.engine.handoff(launch["episode_id"],
-                                      "http://127.0.0.1:8095/v1", "magi", True)
-        self.assertEqual(handoff["network"], "luc1-magi-lab")
-        self.assertEqual(handoff["targets"][0]["host"], "colosseum-test-1234-web")
-        self.assertIn("--lab-container", handoff["argv"])
-        self.assertEqual(handoff["capability_recommendations"]["capabilities"],
-                         ["web_observation"])
-        self.assertNotIn("127.0.0.1", handoff["targets"][0]["host"])
+        briefing = self.engine.describe(launch["episode_id"], "agent")
+        self.assertEqual(briefing["targets"][0]["host"], "colosseum-test-1234-web")
+        self.assertNotIn("127.0.0.1", briefing["targets"][0]["host"])
+        self.assertEqual(briefing["prompt"].splitlines()[0],
+                         "Web service is running at http://colosseum-test-1234-web:8080/")
+
+    def test_compose_container_name_does_not_reveal_scenario(self):
+        name = ComposeRunner._container_name("ep-7865e2051d4ba92633932f9e", 1)
+        self.assertEqual(name, "colosseum-7865e2051d4ba926-target-1")
+        self.assertNotIn("cve", name)
 
     def test_human_launch_output_leads_with_actionable_fields(self):
         launch = self.engine.start("fixture-reverse-file", 10)
-        launch["handoff"] = self.engine.handoff(launch["episode_id"], "http://127.0.0.1:8095/v1", "magi", True)
         launch["next_actions"] = {"stop": f"magi-colosseum stop {launch['episode_id']}",
                                   "reset": f"magi-colosseum reset {launch['episode_id']}"}
         output = human(launch)
         self.assertIn(f"Episode: {launch['episode_id']}", output)
-        self.assertIn("Run Luc1-MAGI:", output)
+        self.assertIn("Artifact:", output)
         self.assertIn("magi-colosseum stop", output)
 
     def test_start_seed_is_optional(self):
         args = parser().parse_args(["start", "fixture-reverse-file"])
         self.assertIsNone(args.seed)
 
-    def test_file_scenario_certification_exercises_full_lifecycle(self):
-        result = self.engine.certify("fixture-reverse-file", 12)
-        self.assertEqual(result["status"], "certified")
-        self.assertEqual([item["id"] for item in result["checks"]],
-                         ["validate", "build", "readiness", "stop", "reset"])
+    def test_ctl_command_is_available(self):
+        self.assertEqual(parser().parse_args(["ctl"]).command, "ctl")
+
+    def test_episode_store_hides_stopped_by_default(self):
+        ready = self.engine.start("fixture-reverse-file", 15)
+        stopped = self.engine.start("fixture-reverse-file", 16)
+        self.engine.stop(stopped["episode_id"])
+        visible = [item["episode_id"] for item in self.engine.store.list()]
+        archived = [item["episode_id"] for item in self.engine.store.list(True)]
+        self.assertIn(ready["episode_id"], visible)
+        self.assertNotIn(stopped["episode_id"], visible)
+        self.assertIn(stopped["episode_id"], archived)
+
+    def test_engine_can_start_from_a_worker_thread(self):
+        result = []
+        failure = []
+
+        def start():
+            try:
+                result.append(self.engine.start("fixture-reverse-file", 18))
+            except Exception as exc:
+                failure.append(exc)
+
+        worker = threading.Thread(target=start)
+        worker.start()
+        worker.join()
+        self.assertEqual(failure, [])
+        self.assertEqual(result[0]["status"], "ready")
+        self.assertEqual(self.engine.store.get(result[0]["episode_id"])["status"], "ready")
+
+    def test_random_start_reports_progress(self):
+        progress = []
+        launch = self.engine.start_random(5, category="reverse-engineering",
+                                          progress=progress.append)
+        self.assertEqual(launch["status"], "ready")
+        self.assertTrue(any(message.startswith("validating") for message in progress))
+        self.assertTrue(any(message.startswith("selected") for message in progress))
+        self.assertTrue(any(message.startswith("ready") for message in progress))
 
 
 class ImporterTests(unittest.TestCase):
@@ -164,7 +200,7 @@ class ImporterTests(unittest.TestCase):
             self.assertNotIn("flag{hidden}", json.dumps(scenario.agent_view()))
             engine = Engine(Catalog([Path(output_dir)]), Path(output_dir) / "state")
             launch = engine.start(scenario.id, 11)
-            delivered = Path(launch["capabilities"][0]["local_path"])
+            delivered = Path(launch["artifacts"][0]["local_path"])
             self.assertEqual(delivered.read_bytes(), b"fixture")
             self.assertEqual(delivered.relative_to(Path(output_dir) / "state").parts[-3:],
                              ("files", "nested", "challenge.bin"))
@@ -185,13 +221,57 @@ class ImporterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as output_dir:
             result = import_dojo(Path(source_dir), Path(output_dir))
             self.assertEqual(result["status"], "not_forged")
-            self.assertIn("CTF-Forge", result["failed"][0]["error"])
+            self.assertIn("module.yml", result["failed"][0]["error"])
+
+    def test_dojo_imports_safe_files_from_raw_archive_modules(self):
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as output_dir:
+            event = Path(source_dir) / "samplectf2026"
+            task = event / "tinyrev"
+            task.mkdir(parents=True)
+            (event / "module.yml").write_text(
+                "id: samplectf2026\nname: Sample CTF\nchallenges:\n"
+                "  - id: tinyrev\n    name: REV - 100 - Tiny Rev\n")
+            (task / "chall.bin").write_bytes(b"player input")
+            (task / "flagCheck").write_bytes(b"secret evaluator")
+            (task / ".flag.sha256").write_text("secret hash")
+            (task / "DESCRIPTION.md").write_text("description")
+            result = import_dojo(Path(source_dir), Path(output_dir))
+            self.assertEqual(result["imported_count"], 1)
+            self.assertEqual(result["format"], "raw-archive")
+            scenario = load_scenario(Path(output_dir) / "dojo-samplectf2026-tinyrev")
+            self.assertEqual(scenario.manifest["category"], "reverse-engineering")
+            self.assertEqual(scenario.manifest["difficulty"], "unspecified")
+            self.assertEqual(scenario.manifest["source"]["upstream_points"], 100)
+            self.assertEqual([item["source"] for item in scenario.manifest["artifacts"]],
+                             ["chall.bin"])
+            self.assertNotIn("flagCheck", json.dumps(scenario.manifest))
+
+    def test_dojo_decodes_html_entities_in_raw_titles(self):
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as output_dir:
+            event = Path(source_dir) / "samplectf"
+            task = event / "casino"
+            task.mkdir(parents=True)
+            (event / "module.yml").write_text(
+                "id: samplectf\nname: Sample CTF\nchallenges:\n"
+                "  - id: casino\n    name: CRYPTO - 120 - &aring;CTF CasinO\n")
+            (task / "casino.bin").write_bytes(b"challenge")
+            result = import_dojo(Path(source_dir), Path(output_dir))
+            scenario = load_scenario(Path(output_dir) / result["imported"][0]["scenario_id"])
+            self.assertEqual(scenario.manifest["title"], "åCTF CasinO")
 
 
 class ManifestSecurityTests(unittest.TestCase):
     def test_bundled_scenarios_validate(self):
         scenarios = Catalog([SCENARIOS]).all()
         self.assertEqual({item.id for item in scenarios}, {"fixture-reverse-file", "fixture-network-service"})
+
+    def test_catalog_cache_can_be_refreshed(self):
+        catalog = Catalog([SCENARIOS])
+        first = catalog.all()
+        self.assertIsNotNone(catalog._cache)
+        catalog.refresh()
+        self.assertIsNone(catalog._cache)
+        self.assertEqual([item.id for item in catalog.all()], [item.id for item in first])
 
     def test_stale_import_does_not_break_valid_catalog_entries(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -294,6 +374,37 @@ class RunnerContractTests(unittest.TestCase):
             with self.assertRaises(StartError):
                 engine.start("fixture-reverse-file", 5)
             self.assertTrue(runner.stopped)
+
+
+class WebDashboardTests(unittest.TestCase):
+    def test_dashboard_serves_catalog_and_scenario_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = Engine(Catalog([SCENARIOS]), root / "state", root / "work")
+            app = create_app(engine)
+            details = _scenario_detail(engine.catalog.get("fixture-reverse-file"))
+            self.assertTrue(any(route.path == "/api/catalog" for route in app.routes))
+            self.assertIn("MAGI Colosseum", (ASSETS / "index.html").read_text())
+            self.assertTrue((ASSETS / "app.css").is_file())
+            self.assertTrue((ASSETS / "app.js").is_file())
+            self.assertEqual(details["category"], "reverse-engineering")
+            self.assertIn("Analyze the supplied", details["objective"])
+
+    def test_dashboard_start_runs_as_background_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = Engine(Catalog([SCENARIOS]), root / "state", root / "work")
+            jobs = Jobs()
+            job = jobs.submit("start", lambda update: engine.start(
+                "fixture-reverse-file", 21))
+            for _ in range(100):
+                status = jobs.get(job["id"])
+                if status["status"] in {"complete", "failed"}:
+                    break
+                threading.Event().wait(.01)
+            jobs.close()
+            self.assertEqual(status["status"], "complete")
+            self.assertIn("Challenge file is located at", status["result"]["prompt"])
 
 if __name__ == "__main__":
     unittest.main()
